@@ -4,39 +4,67 @@ import random
 import smtplib
 import ssl
 import time
+import os
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-import os
+
+from openai import OpenAI
+from dotenv import load_dotenv
 
 # ================================
+# LOAD API KEY
+# ================================
+load_dotenv()
+client = OpenAI()
+
+# ============================================================
+# MODE SWITCH — EDIT THIS LINE ONLY
+# Options: "development" or "production"
+# ============================================================
+
+MODE = "development"   # ← change to "production" when ready
+TEST_EMAIL = "support@hubbalicious.com"
+
+print(f"\n========== RUNNING IN {MODE.upper()} MODE ==========\n")
+
+
+# ============================================================
+# FILE PATHS
+# ============================================================
+
+CSV_PATH = "school_scraper/fundraiser_outreach.csv"
+LOG_PATH = "sent_log.csv"
+SENDERS_PATH = "senders.json"
+
+
+# ============================================================
 # LOAD SENDER ACCOUNTS
-# ================================
+# ============================================================
 
-with open("senders.json", "r") as f:
+with open(SENDERS_PATH, "r") as f:
     SENDER_ACCOUNTS = json.load(f)
 
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 
-# ================================
-# SETTINGS
-# ================================
 
-CSV_PATH = "Fundraiser Outreach - Fundraiser Outreach.csv"
-LOG_PATH = "sent_log.csv"
+# ============================================================
+# SETTINGS
+# ============================================================
 
 MIN_DELAY = 8
 MAX_DELAY = 25
 MAX_PER_ACCOUNT_PER_RUN = 200
-
 SUBJECT_LINE = "Quick question about your PTO"
 
-# ========================================================
+
+# ============================================================
 # LOGGING
-# ========================================================
+# ============================================================
 
 def init_log_file():
+    """Create log file if missing."""
     if not os.path.exists(LOG_PATH):
         with open(LOG_PATH, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
@@ -51,6 +79,7 @@ def init_log_file():
             ])
 
 def write_log(sender_email, recipient, school, admin_name, status, error=""):
+    """Append a row to the log file."""
     with open(LOG_PATH, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
@@ -62,29 +91,62 @@ def write_log(sender_email, recipient, school, admin_name, status, error=""):
             status,
             error
         ])
+    print(f"LOG: {status.upper()} | {recipient} | via {sender_email}")
 
 
-# ================================
-# EMAIL TEMPLATE
-# ================================
+# ============================================================
+# AI PERSONALIZED EMAIL GENERATION
+# ============================================================
 
-def build_email_body(admin_name, school):
-    name = admin_name if admin_name else "there"
+def build_email_body(admin_name, school, county, entity_type, website):
+    """
+    Generates a unique, warm, human, non-commercial email asking 
+    for the PTO contact, personalized to the school and admin.
+    """
 
-    return f"""Hi {name},
+    prompt = f"""
+You are generating a friendly, non-commercial outreach email.
 
-We’re connecting with local schools to understand how parent and community involvement is organized. I came across {school} and was hoping you might know the best contact for your PTO or parent leadership team.
+PURPOSE:
+Ask for the PTO contact. Do NOT pitch or describe a service.
 
-Any direction would be a big help — thank you!
+TONE:
+Friendly, natural, warm, conversational, human. 
+It must sound individually typed.
 
-Best,
-Hubbalicious Outreach Team
-"""
+PERSONALIZATION DETAILS:
+- Administrator Name: {admin_name}
+- School: {school}
+- County: {county}
+- Entity Type: {entity_type}
+- Website: {website}
+
+REQUIREMENTS:
+- 4–6 sentences max.
+- No sales language.
+- No "we offer", "we provide", or promotional tone.
+- Start with “Hi {admin_name},” or “Hi there,” if blank.
+- End with: Hubbalicious Outreach Team
+- Ask gently for the PTO contact.
+- Make it feel personal, not automated.
+- DO NOT mention AI or personalization.
+
+OUTPUT:
+Return the full email body only, no quotes.
+    """
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7
+    )
+
+    return response.choices[0].message.content.strip()
 
 
-# ================================
+# ============================================================
 # SEND EMAIL
-# ================================
+# ============================================================
 
 def send_email(sender, to_email, subject, body):
     msg = MIMEMultipart()
@@ -103,66 +165,85 @@ def send_email(sender, to_email, subject, body):
         server.send_message(msg)
 
 
-# ================================
-# MAIN JOB
-# ================================
+# ============================================================
+# OUTREACH ENGINE
+# ============================================================
 
 def multi_account_outreach(csv_file):
     init_log_file()
 
-    send_index = {acc["email"]: 0 for acc in SENDER_ACCOUNTS}
-
+    # Load already-contacted recipients
     already_contacted = set()
     with open(LOG_PATH, newline="", encoding="utf-8") as f:
-        log_reader = csv.DictReader(f)
-        for row in log_reader:
+        for row in csv.DictReader(f):
             already_contacted.add(row["recipient_email"])
+
+    # Track sent count per account
+    send_index = {acc["email"]: 0 for acc in SENDER_ACCOUNTS}
 
     with open(csv_file, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
 
         for row in reader:
-            recipient = (row.get("Email") or "").strip()
-            if not recipient:
-                continue
 
-            # Skip if already contacted
-            if recipient in already_contacted:
-                continue
+            # DEVELOPMENT MODE
+            if MODE == "development":
+                recipient = TEST_EMAIL
 
-            school = row.get("School", "").strip()
+            else:
+                # PRODUCTION MODE
+                recipient = (row.get("Email") or "").strip()
+                if not recipient:
+                    continue
+                if recipient in already_contacted:
+                    continue
+
             admin_name = row.get("Administrator Name", "").strip()
+            school = row.get("School", "").strip()
+            county = row.get("County", "").strip()
+            entity_type = row.get("Entity Type", "").strip()
+            website = row.get("Website", "").strip()
 
+            # Determine eligible sending accounts
             eligible = [
                 acc for acc in SENDER_ACCOUNTS
                 if send_index[acc["email"]] < MAX_PER_ACCOUNT_PER_RUN
             ]
 
             if not eligible:
-                print("All accounts hit limit.")
+                print("All accounts are at their daily sending limit.")
                 break
 
             sender = random.choice(eligible)
-            body = build_email_body(admin_name, school)
 
-            print(f"Sending to {recipient} from {sender['email']}...")
+            print(f"\nGenerating AI email for {recipient}...")
+            body = build_email_body(admin_name, school, county, entity_type, website)
+
+            print(f"Sending from {sender['email']} to {recipient}...")
 
             try:
                 send_email(sender, recipient, SUBJECT_LINE, body)
                 send_index[sender["email"]] += 1
-                print("Sent!")
+                print(" ✔ SENT")
 
                 write_log(sender["email"], recipient, school, admin_name, "success")
 
             except Exception as e:
-                print(f"Error sending to {recipient}: {e}")
+                print(f" ✖ ERROR: {e}")
                 write_log(sender["email"], recipient, school, admin_name, "error", str(e))
 
-            delay = random.uniform(MIN_DELAY, MAX_DELAY)
-            print(f"Sleeping {delay:.1f} seconds\n")
+            # Randomized wait to avoid spam filters
+            delay = round(random.uniform(MIN_DELAY, MAX_DELAY), 2)
+            print(f" ⏳ Waiting {delay} seconds...\n")
             time.sleep(delay)
 
-    print("Batch complete.")
+            # DEV MODE stops after one email per account
+            if MODE == "development":
+                if all(send_index[a["email"]] >= 1 for a in SENDER_ACCOUNTS):
+                    print("\nDEV MODE COMPLETE — one test email per account sent.")
+                    break
+
+    print("\n========== BATCH COMPLETE ==========\n")
 
 
 if __name__ == "__main__":
