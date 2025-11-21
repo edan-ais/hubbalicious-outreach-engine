@@ -23,7 +23,7 @@ SMTP_PORT = 587
 # SETTINGS
 # ================================
 
-CSV_PATH = "schools.csv"
+CSV_PATH = "Fundraiser Outreach - Fundraiser Outreach.csv"
 LOG_PATH = "sent_log.csv"
 
 MIN_DELAY = 8
@@ -79,7 +79,6 @@ Any direction would be a big help — thank you!
 
 Best,
 Hubbalicious Outreach Team
-Helping Unite Businesses, LLC
 """
 
 
